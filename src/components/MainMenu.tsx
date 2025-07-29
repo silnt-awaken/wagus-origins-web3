@@ -2,7 +2,7 @@ import { useGameStore } from '@/store/gameStore';
 import { Play, Shield, Zap, Heart } from 'lucide-react';
 
 export default function MainMenu() {
-  const { setCurrentPage, setShowOverlay } = useGameStore();
+  const { setCurrentPage, setShowOverlay, setSelectedFaction } = useGameStore();
 
   const handleStartGame = () => {
     setCurrentPage('game');
@@ -36,19 +36,26 @@ export default function MainMenu() {
         {/* Start Button */}
         <div className="flex flex-col gap-4 mb-12">
           <button
-            onClick={handleStartGame}
-            className="group relative px-8 py-4 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold text-lg rounded-lg transition-all duration-300 transform hover:scale-105 shadow-lg shadow-cyan-500/25 hover:shadow-cyan-500/50"
+            onClick={() => {
+              setSelectedFaction('WAGUS'); // Set default faction
+              setShowOverlay(false);
+              setCurrentPage('game');
+            }}
+            className="group relative px-8 py-4 bg-gradient-to-r from-red-600 to-orange-600 hover:from-red-500 hover:to-orange-500 text-white font-bold text-lg rounded-lg transition-all duration-300 transform hover:scale-105 shadow-lg shadow-red-500/25 hover:shadow-red-500/50"
           >
-            <span className="relative z-10">Enter Game World</span>
-            <div className="absolute inset-0 bg-gradient-to-r from-cyan-400 to-blue-400 opacity-0 group-hover:opacity-20 rounded-lg transition-opacity duration-300" />
+            <span className="relative z-10">🎮 Play Game Now!</span>
+            <div className="absolute inset-0 bg-gradient-to-r from-red-400 to-orange-400 opacity-0 group-hover:opacity-20 rounded-lg transition-opacity duration-300" />
           </button>
           
           <button
-            onClick={handleTutorial}
-            className="group relative px-8 py-4 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 text-white font-bold text-lg rounded-lg transition-all duration-300 transform hover:scale-105 shadow-lg shadow-purple-500/25 hover:shadow-purple-500/50"
+            onClick={() => {
+              setShowOverlay(true);
+              setCurrentPage('intro');
+            }}
+            className="group relative px-6 py-3 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-semibold text-base rounded-lg transition-all duration-300 transform hover:scale-105 shadow-lg shadow-cyan-500/25 hover:shadow-cyan-500/50"
           >
-            <span className="relative z-10">Story Mode</span>
-            <div className="absolute inset-0 bg-gradient-to-r from-purple-400 to-pink-400 opacity-0 group-hover:opacity-20 rounded-lg transition-opacity duration-300" />
+            <span className="relative z-10">Tutorial Mode</span>
+            <div className="absolute inset-0 bg-gradient-to-r from-cyan-400 to-blue-400 opacity-0 group-hover:opacity-20 rounded-lg transition-opacity duration-300" />
           </button>
         </div>
 

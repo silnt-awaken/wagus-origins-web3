@@ -17,11 +17,28 @@ class TutorialGameScene extends Phaser.Scene {
   private hackConsoles!: Phaser.Physics.Arcade.Group;
   private collisionLayer!: Phaser.Physics.Arcade.StaticGroup;
   
+  // Combat system
+  private enemies!: Phaser.Physics.Arcade.Group;
+  private projectiles!: Phaser.Physics.Arcade.Group;
+  private weapons!: Phaser.Physics.Arcade.Group;
+  private powerUps!: Phaser.Physics.Arcade.Group;
+  
+  // Weapon system
+  private currentWeapon: string = 'plasma_rifle';
+  private weaponCooldown = 0;
+  private weaponDamage = 15; // Reduced from 25
+  private ammo = 100;
+  private maxWeaponCooldown = 500; // 500ms between shots
+  
   // Tutorial system
   private tutorialStep = 0;
   private tutorialPrompts!: Phaser.GameObjects.Text;
   private isInTutorial = true;
   private currentInteractable: any = null;
+  private tutorialPhase = 'movement'; // movement, mining, scanning, combat_intro, combat_weapons, hacking, complete
+  private tutorialEnemiesSpawned = 0;
+  private maxTutorialEnemies = 1;
+  private tutorialCompleted = false;
   
   // UI Elements
   private healthBar!: Phaser.GameObjects.Graphics;
@@ -30,16 +47,31 @@ class TutorialGameScene extends Phaser.Scene {
   private inventoryPanel!: Phaser.GameObjects.Container;
   private progressBar!: Phaser.GameObjects.Graphics;
   private tooltipText!: Phaser.GameObjects.Text;
+  private weaponText!: Phaser.GameObjects.Text;
+  private ammoText!: Phaser.GameObjects.Text;
+  private levelText!: Phaser.GameObjects.Text;
+  private killsText!: Phaser.GameObjects.Text;
   
   // Game state
   private playerHealth = 100;
   private playerEnergy = 100;
   private playerTokens = 0;
+  private playerLevel = 1;
+  private playerExp = 0;
   private inventory: { [key: string]: number } = {
     'cyber_ore': 0,
     'data_fragments': 0,
-    'hack_tools': 0
+    'hack_tools': 0,
+    'plasma_rifle': 1,
+    'cyber_sword': 1,
+    'health_packs': 3
   };
+  
+  // Combat state
+  private isInCombat = false;
+  private enemySpawnTimer = 0;
+  private waveNumber = 1;
+  private enemiesKilled = 0;
   
   // Mining system
   private isMining = false;
@@ -60,14 +92,16 @@ class TutorialGameScene extends Phaser.Scene {
   private worldWidth = 800;
   private worldHeight = 600;
   
-  // Tutorial steps
-  private tutorialSteps = [
-    'Welcome to WAGUS Tutorial! Use WASD to move around.',
-    'Find a mining node (glowing blue) and press E to mine resources.',
-    'Press R to scan the area and reveal hidden objects.',
-    'Locate a hack console (red terminal) and press E to hack.',
-    'Great! Now choose your faction to complete the tutorial.'
-  ];
+  // Tutorial steps with phases
+  private tutorialSteps = {
+    movement: 'Welcome to WAGUS Tutorial! Use WASD to move around.',
+    mining: 'Great! Now find a mining node (glowing blue) and press E to mine cyber ore.',
+    scanning: 'Excellent! Press R to scan the area and reveal hidden objects.',
+    combat_intro: 'ALERT! Enemy detected! Press SPACE to shoot with your plasma rifle!',
+    combat_weapons: 'Well done! Press 2 to switch to cyber sword, then press SPACE to attack!',
+    hacking: 'Perfect! Now locate a hack console (red terminal) and press E to hack.',
+    complete: 'Tutorial complete! You\'re ready for the full WAGUS experience!'
+  };
 
   constructor() {
     super({ key: 'TutorialGameScene' });
@@ -486,6 +520,12 @@ class TutorialGameScene extends Phaser.Scene {
     // Create interactive objects
     this.createInteractiveObjects();
     
+    // Create combat system
+    this.createEnemies();
+    this.createWeapons();
+    this.createProjectiles();
+    this.createPowerUps();
+    
     // Setup input
     this.setupInput();
     
@@ -495,8 +535,16 @@ class TutorialGameScene extends Phaser.Scene {
     // Setup physics
     this.setupPhysics();
     
+    // Setup combat collisions
+    this.setupCombatCollisions();
+    
+    // Don't start continuous enemy spawning in tutorial mode
+    // Enemies will be spawned manually during tutorial phases
+    
     // Start tutorial
     this.startTutorial();
+    
+    console.log('Tutorial started with phase:', this.tutorialPhase);
     
     console.log('Tutorial zone initialized successfully!');
   }
@@ -534,10 +582,19 @@ class TutorialGameScene extends Phaser.Scene {
       this.player.setVelocityY(speed);
     }
     
+    // Shooting - only allow single shots, not continuous
+    if (Phaser.Input.Keyboard.JustDown(this.cursors.space) && this.weaponCooldown <= 0 && this.ammo > 0) {
+      this.shoot();
+    }
+    
+    // Weapon cooldown - proper time-based cooldown
+    if (this.weaponCooldown > 0) {
+      this.weaponCooldown -= this.game.loop.delta; // Use actual delta time
+    }
+    
     // Check for movement tutorial completion
-    if (this.tutorialStep === 0 && (this.wasd.W.isDown || this.wasd.A.isDown || this.wasd.S.isDown || this.wasd.D.isDown)) {
-      this.tutorialStep = 1;
-      this.updateTutorialPrompt();
+    if (this.tutorialPhase === 'movement' && (this.wasd.W.isDown || this.wasd.A.isDown || this.wasd.S.isDown || this.wasd.D.isDown || this.cursors.left.isDown || this.cursors.right.isDown || this.cursors.up.isDown || this.cursors.down.isDown)) {
+      this.advanceTutorialPhase();
     }
     
     // Handle interaction key
@@ -553,6 +610,14 @@ class TutorialGameScene extends Phaser.Scene {
     // Update scan cooldown
     if (this.scanCooldown > 0) {
       this.scanCooldown -= 1;
+    }
+    
+    // Update combat and enemy AI
+    this.updateCombat();
+    
+    // Regenerate energy slowly
+    if (this.playerEnergy < 100) {
+      this.playerEnergy = Math.min(100, this.playerEnergy + 0.1);
     }
     
     // Regenerate energy slowly
@@ -591,9 +656,8 @@ class TutorialGameScene extends Phaser.Scene {
     this.performScan();
     
     // Advance tutorial if this was the first scan
-    if (this.tutorialStep === 2) {
-      this.tutorialStep = 3;
-      this.updateTutorialPrompt();
+    if (this.tutorialPhase === 'scanning') {
+      this.advanceTutorialPhase();
     }
     
     this.updateUI();
@@ -760,20 +824,28 @@ class TutorialGameScene extends Phaser.Scene {
     // Interaction keys
     this.interactKey = this.input.keyboard!.addKey('E');
     this.scanKey = this.input.keyboard!.addKey('R');
+    
+    // Weapon switching keys
+    this.input.keyboard!.addKey('ONE').on('down', () => this.switchWeapon('plasma_rifle'));
+    this.input.keyboard!.addKey('TWO').on('down', () => this.switchWeapon('cyber_sword'));
   }
   
   createUI() {
-    // Health bar
+    // Get game dimensions for responsive positioning
+    const gameWidth = this.sys.game.config.width as number;
+    const gameHeight = this.sys.game.config.height as number;
+    
+    // Health bar (top-left)
     this.healthBar = this.add.graphics();
     this.healthBar.setScrollFactor(0);
     this.healthBar.setDepth(100);
     
-    // Energy bar
+    // Energy bar (top-left, below health)
     this.energyBar = this.add.graphics();
     this.energyBar.setScrollFactor(0);
     this.energyBar.setDepth(100);
     
-    // Token counter
+    // Token counter (top-left)
     this.tokenCounter = this.add.text(10, 10, 'WAGUS Tokens: 0', {
       fontSize: '16px',
       color: '#00d4ff',
@@ -783,16 +855,71 @@ class TutorialGameScene extends Phaser.Scene {
     this.tokenCounter.setScrollFactor(0);
     this.tokenCounter.setDepth(100);
     
-    // Tutorial prompts
-    this.tutorialPrompts = this.add.text(10, 50, '', {
+    // Combat UI (top-right)
+    this.weaponText = this.add.text(gameWidth - 10, 10, `Weapon: ${this.currentWeapon.toUpperCase()}`, {
+      fontSize: '14px',
+      color: '#ff6600',
+      backgroundColor: '#0a1628',
+      padding: { x: 6, y: 3 }
+    });
+    this.weaponText.setOrigin(1, 0); // Right-aligned
+    this.weaponText.setScrollFactor(0);
+    this.weaponText.setDepth(100);
+    
+    this.ammoText = this.add.text(gameWidth - 10, 35, `Ammo: ${this.ammo}`, {
       fontSize: '14px',
       color: '#ffffff',
-      backgroundColor: '#1a2b3d',
-      padding: { x: 12, y: 8 },
-      wordWrap: { width: 400 }
+      backgroundColor: '#0a1628',
+      padding: { x: 6, y: 3 }
     });
+    this.ammoText.setOrigin(1, 0); // Right-aligned
+    this.ammoText.setScrollFactor(0);
+    this.ammoText.setDepth(100);
+    
+    this.levelText = this.add.text(gameWidth - 10, 60, `Level: ${this.playerLevel}`, {
+      fontSize: '14px',
+      color: '#ffff00',
+      backgroundColor: '#0a1628',
+      padding: { x: 6, y: 3 }
+    });
+    this.levelText.setOrigin(1, 0); // Right-aligned
+    this.levelText.setScrollFactor(0);
+    this.levelText.setDepth(100);
+    
+    this.killsText = this.add.text(gameWidth - 10, 85, `Kills: ${this.enemiesKilled}`, {
+      fontSize: '14px',
+      color: '#ff0000',
+      backgroundColor: '#0a1628',
+      padding: { x: 6, y: 3 }
+    });
+    this.killsText.setOrigin(1, 0); // Right-aligned
+    this.killsText.setScrollFactor(0);
+    this.killsText.setDepth(100);
+    
+    // Tutorial prompts (center-top, prominent and always visible)
+    this.tutorialPrompts = this.add.text(gameWidth / 2, 50, '', {
+      fontSize: '18px',
+      color: '#ffffff',
+      backgroundColor: '#1a2b3d',
+      padding: { x: 20, y: 16 },
+      wordWrap: { width: 700 },
+      align: 'center',
+      stroke: '#000000',
+      strokeThickness: 2
+    });
+    this.tutorialPrompts.setOrigin(0.5, 0); // Center-aligned
     this.tutorialPrompts.setScrollFactor(0);
-    this.tutorialPrompts.setDepth(100);
+    this.tutorialPrompts.setDepth(200); // Highest depth for visibility
+    
+    // Controls help text (bottom-left)
+    const controlsText = this.add.text(10, gameHeight - 110, 'CONTROLS:\nWASD - Move\nSPACE - Shoot\n1/2 - Switch Weapons\nE - Interact\nR - Scan', {
+      fontSize: '12px',
+      color: '#888888',
+      backgroundColor: '#0a1628',
+      padding: { x: 6, y: 4 }
+    });
+    controlsText.setScrollFactor(0);
+    controlsText.setDepth(100);
     
     // Tooltip text
     this.tooltipText = this.add.text(0, 0, '', {
@@ -844,12 +971,74 @@ class TutorialGameScene extends Phaser.Scene {
   }
 
   updateTutorialPrompt() {
-    if (this.tutorialStep < this.tutorialSteps.length) {
-      this.tutorialPrompts.setText(this.tutorialSteps[this.tutorialStep]);
-    } else {
-      this.tutorialPrompts.setText('Tutorial Complete! Choose your faction.');
-      this.completeTutorial();
+    if (this.tutorialPhase in this.tutorialSteps) {
+      this.tutorialPrompts.setText(this.tutorialSteps[this.tutorialPhase as keyof typeof this.tutorialSteps]);
     }
+  }
+
+  advanceTutorialPhase() {
+    switch (this.tutorialPhase) {
+      case 'movement':
+        // Player has moved, advance to mining
+        this.tutorialPhase = 'mining';
+        break;
+      case 'mining':
+        // Player has mined, advance to scanning
+        this.tutorialPhase = 'scanning';
+        break;
+      case 'scanning':
+        // Player has scanned, introduce first enemy
+        this.tutorialPhase = 'combat_intro';
+        this.spawnTutorialEnemy();
+        break;
+      case 'combat_intro':
+        // Player killed first enemy, teach weapon switching
+        this.tutorialPhase = 'combat_weapons';
+        this.tutorialEnemiesSpawned = 0; // Reset counter for next phase
+        this.spawnTutorialEnemy();
+        break;
+      case 'combat_weapons':
+        // Player used different weapon, advance to hacking
+        this.tutorialPhase = 'hacking';
+        break;
+      case 'hacking':
+        // Tutorial complete
+        this.tutorialPhase = 'complete';
+        this.completeTutorial();
+        break;
+    }
+    this.updateTutorialPrompt();
+  }
+
+  spawnTutorialEnemy() {
+    if (this.tutorialEnemiesSpawned >= this.maxTutorialEnemies) return;
+    
+    // Spawn enemy near player but not too close
+    const spawnDistance = 200;
+    const angle = Math.random() * Math.PI * 2;
+    const spawnX = this.player.x + Math.cos(angle) * spawnDistance;
+    const spawnY = this.player.y + Math.sin(angle) * spawnDistance;
+    
+    // Ensure spawn position is within world bounds
+    const clampedX = Phaser.Math.Clamp(spawnX, 50, this.worldWidth - 50);
+    const clampedY = Phaser.Math.Clamp(spawnY, 50, this.worldHeight - 50);
+    
+    const enemy = this.enemies.create(clampedX, clampedY, 'player');
+    
+    // Tutorial enemy - weaker for learning
+    enemy.setTint(0xff0000);
+    enemy.setScale(1.5);
+    enemy.health = 30; // Lower health for tutorial
+    enemy.speed = 60;
+    enemy.enemyType = 'Tutorial Drone';
+    enemy.isTutorialEnemy = true;
+    
+    this.tutorialEnemiesSpawned++;
+    
+    console.log(`Spawned tutorial enemy ${this.tutorialEnemiesSpawned}/${this.maxTutorialEnemies} for phase: ${this.tutorialPhase}`);
+    
+    // Update tutorial prompt to show combat instructions
+    this.updateTutorialPrompt();
   }
 
   nearInteractable(player: any, interactable: any) {
@@ -946,9 +1135,8 @@ class TutorialGameScene extends Phaser.Scene {
     node.destroy();
     
     // Advance tutorial if this was the first mine
-    if (this.tutorialStep === 1) {
-      this.tutorialStep = 2;
-      this.updateTutorialPrompt();
+    if (this.tutorialPhase === 'mining') {
+      this.advanceTutorialPhase();
     }
     
     this.updateUI();
@@ -1064,9 +1252,8 @@ class TutorialGameScene extends Phaser.Scene {
     }
     
     // Advance tutorial if this was the first hack
-    if (this.tutorialStep === 3) {
-      this.tutorialStep = 4;
-      this.updateTutorialPrompt();
+    if (this.tutorialPhase === 'hacking') {
+      this.advanceTutorialPhase();
     }
     
     this.updateUI();
@@ -1143,6 +1330,427 @@ class TutorialGameScene extends Phaser.Scene {
     
     // Update token counter
     this.tokenCounter.setText(`WAGUS Tokens: ${this.playerTokens}`);
+    
+    // Update combat UI
+    this.weaponText.setText(`Weapon: ${this.currentWeapon.toUpperCase()}`);
+    this.ammoText.setText(`Ammo: ${this.ammo}`);
+    this.levelText.setText(`Level: ${this.playerLevel}`);
+    this.killsText.setText(`Kills: ${this.enemiesKilled}`);
+  }
+
+  // Combat System Methods
+  createEnemies() {
+    this.enemies = this.physics.add.group();
+  }
+
+  createWeapons() {
+    this.weapons = this.physics.add.group();
+  }
+
+  createProjectiles() {
+    this.projectiles = this.physics.add.group();
+  }
+
+  createPowerUps() {
+    this.powerUps = this.physics.add.group();
+  }
+
+  setupCombatCollisions() {
+    // Player vs enemies
+    this.physics.add.overlap(this.player, this.enemies, this.playerHitByEnemy, undefined, this);
+    
+    // Projectiles vs enemies
+    this.physics.add.overlap(this.projectiles, this.enemies, this.projectileHitEnemy, undefined, this);
+    
+    // Player vs power-ups
+    this.physics.add.overlap(this.player, this.powerUps, this.collectPowerUp, undefined, this);
+  }
+
+  startEnemySpawning() {
+    this.time.addEvent({
+      delay: 4000, // Increased spawn delay for better balance
+      callback: this.spawnEnemy,
+      callbackScope: this,
+      loop: true
+    });
+  }
+
+  spawnEnemy() {
+    const spawnPoints = [
+      { x: 50, y: 50 },
+      { x: this.worldWidth - 50, y: 50 },
+      { x: 50, y: this.worldHeight - 50 },
+      { x: this.worldWidth - 50, y: this.worldHeight - 50 }
+    ];
+    
+    const spawnPoint = Phaser.Utils.Array.GetRandom(spawnPoints);
+    const enemy = this.enemies.create(spawnPoint.x, spawnPoint.y, 'player');
+    
+    // Random enemy types - increased health for better balance
+    const enemyTypes = [
+      { tint: 0xff0000, health: 80, speed: 80, scale: 1.5, name: 'Cyber Drone' },
+      { tint: 0xff6600, health: 120, speed: 60, scale: 1.8, name: 'Heavy Bot' },
+      { tint: 0xff0066, health: 60, speed: 120, scale: 1.2, name: 'Scout' }
+    ];
+    
+    const enemyType = Phaser.Utils.Array.GetRandom(enemyTypes);
+    enemy.setTint(enemyType.tint);
+    enemy.setScale(enemyType.scale);
+    enemy.health = enemyType.health;
+    enemy.speed = enemyType.speed;
+    enemy.enemyType = enemyType.name;
+    
+    // Chance to spawn power-up when enemy dies
+    enemy.dropsPowerUp = Math.random() < 0.3;
+  }
+
+  playerHitByEnemy(player: any, enemy: any) {
+    // Add invincibility frames to prevent instant death
+    if (this.player.getData('invulnerable')) return;
+    
+    this.playerHealth -= 15; // Increased damage to make combat more dangerous
+    
+    // Add brief invulnerability
+    this.player.setData('invulnerable', true);
+    this.player.setAlpha(0.5);
+    
+    this.time.delayedCall(1000, () => {
+      this.player.setData('invulnerable', false);
+      this.player.setAlpha(1);
+    });
+    
+    if (this.playerHealth <= 0) {
+      this.gameOver();
+    }
+    this.updateUI();
+  }
+
+  projectileHitEnemy(projectile: any, enemy: any) {
+    projectile.destroy();
+    enemy.health -= this.weaponDamage;
+    
+    // Create hit effect
+    const hitEffect = this.add.circle(enemy.x, enemy.y, 20, 0xff0000, 0.6);
+    this.tweens.add({
+      targets: hitEffect,
+      alpha: 0,
+      scale: 2,
+      duration: 200,
+      onComplete: () => hitEffect.destroy()
+    });
+    
+    // Show damage number
+    const damageText = this.add.text(enemy.x, enemy.y - 30, `-${this.weaponDamage}`, {
+      fontSize: '14px',
+      color: '#ff0000'
+    });
+    
+    this.tweens.add({
+      targets: damageText,
+      y: damageText.y - 20,
+      alpha: 0,
+      duration: 800,
+      onComplete: () => damageText.destroy()
+    });
+    
+    if (enemy.health <= 0) {
+      // Create explosion effect
+      const explosion = this.add.circle(enemy.x, enemy.y, 30, 0xffff00, 0.8);
+      this.tweens.add({
+        targets: explosion,
+        alpha: 0,
+        scale: 3,
+        duration: 300,
+        onComplete: () => explosion.destroy()
+      });
+      
+      // Spawn power-up if enemy drops one
+      if (enemy.dropsPowerUp) {
+        this.spawnPowerUp(enemy.x, enemy.y);
+      }
+      
+      enemy.destroy();
+      this.enemiesKilled++;
+      this.playerTokens += 5;
+      
+      // Tutorial phase advancement for enemy defeats
+      if (enemy.isTutorialEnemy) {
+        if (this.tutorialPhase === 'combat_intro') {
+          this.advanceTutorialPhase();
+        } else if (this.tutorialPhase === 'combat_weapons' && this.currentWeapon === 'cyber_sword') {
+          // Only advance if player used cyber sword to kill the enemy
+          this.advanceTutorialPhase();
+        }
+      }
+      
+      // Level up system
+      this.playerExp += 10;
+      if (this.playerExp >= this.playerLevel * 100) {
+        this.levelUp();
+      }
+      
+      this.updateUI();
+    }
+  }
+
+  collectPowerUp(player: any, powerUp: any) {
+    const type = powerUp.getData('type');
+    switch (type) {
+      case 'health':
+        this.playerHealth = Math.min(100, this.playerHealth + 25);
+        break;
+      case 'energy':
+        this.playerEnergy = Math.min(100, this.playerEnergy + 30);
+        break;
+      case 'ammo':
+        this.ammo = Math.min(200, this.ammo + 20);
+        break;
+    }
+    
+    // Show collection effect
+    const collectText = this.add.text(powerUp.x, powerUp.y - 20, `+${type.toUpperCase()}`, {
+      fontSize: '12px',
+      color: '#ffffff'
+    });
+    
+    this.tweens.add({
+      targets: collectText,
+      y: collectText.y - 30,
+      alpha: 0,
+      duration: 1000,
+      onComplete: () => collectText.destroy()
+    });
+    
+    powerUp.destroy();
+    this.updateUI();
+  }
+
+  switchWeapon(weaponType: string) {
+    if (this.inventory[weaponType] && this.inventory[weaponType] > 0) {
+      const previousWeapon = this.currentWeapon;
+      this.currentWeapon = weaponType;
+      
+      // Update weapon stats
+      switch (weaponType) {
+        case 'plasma_rifle':
+          this.weaponDamage = 15;
+          this.maxWeaponCooldown = 500;
+          break;
+        case 'cyber_sword':
+          this.weaponDamage = 25;
+          this.maxWeaponCooldown = 800; // Slower but more powerful
+          break;
+      }
+      
+      // Tutorial: detect weapon switching during combat_weapons phase
+      if (this.tutorialPhase === 'combat_weapons' && weaponType === 'cyber_sword' && previousWeapon !== 'cyber_sword') {
+        // Player successfully switched to cyber sword, but don't advance yet
+        // Wait for them to kill the enemy with the new weapon
+      }
+      
+      this.updateUI();
+      
+      // Show weapon switch notification
+      const switchText = this.add.text(this.player.x, this.player.y - 60, `Switched to ${weaponType.toUpperCase().replace('_', ' ')}`, {
+        fontSize: '14px',
+        color: '#ffff00'
+      }).setOrigin(0.5);
+      
+      this.tweens.add({
+        targets: switchText,
+        y: switchText.y - 30,
+        alpha: 0,
+        duration: 1500,
+        onComplete: () => switchText.destroy()
+      });
+    }
+  }
+
+  gameOver() {
+    this.scene.pause();
+    const gameOverText = this.add.text(this.cameras.main.centerX, this.cameras.main.centerY, 'GAME OVER', {
+      fontSize: '48px',
+      color: '#ff0000'
+    }).setOrigin(0.5);
+    gameOverText.setScrollFactor(0);
+  }
+
+  shoot() {
+    // Check if we have ammo
+    if (this.ammo <= 0) {
+      // Show no ammo message
+      const noAmmoText = this.add.text(this.player.x, this.player.y - 40, 'NO AMMO!', {
+        fontSize: '16px',
+        color: '#ff0000'
+      }).setOrigin(0.5);
+      
+      this.tweens.add({
+        targets: noAmmoText,
+        y: noAmmoText.y - 20,
+        alpha: 0,
+        duration: 1000,
+        onComplete: () => noAmmoText.destroy()
+      });
+      return;
+    }
+    
+    this.weaponCooldown = this.maxWeaponCooldown;
+    this.ammo -= 1;
+    
+    // Create projectile with weapon-specific properties
+    const projectile = this.projectiles.create(this.player.x, this.player.y, 'particle');
+    
+    if (this.currentWeapon === 'plasma_rifle') {
+      projectile.setScale(1.5); // Smaller projectiles
+      projectile.setTint(0x00ffff);
+    } else if (this.currentWeapon === 'cyber_sword') {
+      projectile.setScale(2); // Reduced size
+      projectile.setTint(0xff6600);
+    }
+    
+    // Add muzzle flash effect
+    const muzzleFlash = this.add.circle(this.player.x, this.player.y, 15, 0xffffff, 0.8);
+    this.tweens.add({
+      targets: muzzleFlash,
+      alpha: 0,
+      scale: 2,
+      duration: 100,
+      onComplete: () => muzzleFlash.destroy()
+    });
+    
+    // Calculate direction to nearest enemy
+    let targetEnemy = null;
+    let minDistance = Infinity;
+    
+    this.enemies.children.entries.forEach((enemy: any) => {
+      const distance = Phaser.Math.Distance.Between(this.player.x, this.player.y, enemy.x, enemy.y);
+      if (distance < minDistance) {
+        minDistance = distance;
+        targetEnemy = enemy;
+      }
+    });
+    
+    if (targetEnemy) {
+      const angle = Phaser.Math.Angle.Between(this.player.x, this.player.y, targetEnemy.x, targetEnemy.y);
+      const velocity = 400;
+      projectile.setVelocity(
+        Math.cos(angle) * velocity,
+        Math.sin(angle) * velocity
+      );
+    } else {
+      // Shoot upward if no enemies
+      projectile.setVelocity(0, -400);
+    }
+    
+    // Destroy projectile after 3 seconds
+    this.time.delayedCall(3000, () => {
+      if (projectile.active) {
+        projectile.destroy();
+      }
+    });
+    
+    this.updateUI();
+  }
+
+  spawnPowerUp(x: number, y: number) {
+     const powerUpTypes = [
+       { type: 'health', tint: 0x00ff00, sprite: 'particle' },
+       { type: 'energy', tint: 0x0088ff, sprite: 'particle' },
+       { type: 'ammo', tint: 0xffff00, sprite: 'particle' }
+     ];
+     
+     const powerUpType = Phaser.Utils.Array.GetRandom(powerUpTypes);
+     const powerUp = this.powerUps.create(x, y, powerUpType.sprite);
+     powerUp.setTint(powerUpType.tint);
+     powerUp.setScale(3);
+     powerUp.setData('type', powerUpType.type);
+     
+     // Add floating animation
+     this.tweens.add({
+       targets: powerUp,
+       y: y - 10,
+       duration: 1000,
+       yoyo: true,
+       repeat: -1,
+       ease: 'Sine.easeInOut'
+     });
+     
+     // Auto-destroy after 10 seconds
+     this.time.delayedCall(10000, () => {
+       if (powerUp.active) {
+         powerUp.destroy();
+       }
+     });
+   }
+   
+   levelUp() {
+     this.playerLevel++;
+     this.playerExp = 0;
+     this.playerHealth = 100; // Full heal on level up
+     this.playerEnergy = 100;
+     this.weaponDamage += 5; // Increase damage
+     this.ammo += 50; // Bonus ammo
+     
+     // Show level up effect
+     const levelUpText = this.add.text(this.player.x, this.player.y - 50, `LEVEL UP!\nLevel ${this.playerLevel}`, {
+       fontSize: '20px',
+       color: '#ffff00',
+       align: 'center'
+     }).setOrigin(0.5);
+     
+     // Create level up particle effect
+     for (let i = 0; i < 10; i++) {
+       const particle = this.add.circle(
+         this.player.x + Phaser.Math.Between(-30, 30),
+         this.player.y + Phaser.Math.Between(-30, 30),
+         5,
+         0xffff00,
+         0.8
+       );
+       
+       this.tweens.add({
+         targets: particle,
+         y: particle.y - 50,
+         alpha: 0,
+         duration: 1500,
+         onComplete: () => particle.destroy()
+       });
+     }
+     
+     this.tweens.add({
+       targets: levelUpText,
+       y: levelUpText.y - 30,
+       alpha: 0,
+       duration: 2000,
+       onComplete: () => levelUpText.destroy()
+     });
+     
+     this.updateUI();
+   }
+
+  updateCombat() {
+    // Update enemy AI
+    this.enemies.children.entries.forEach((enemy: any) => {
+      if (!enemy.active) return;
+      
+      // Move towards player
+      const angle = Phaser.Math.Angle.Between(enemy.x, enemy.y, this.player.x, this.player.y);
+      const velocity = enemy.speed || 80;
+      
+      enemy.setVelocity(
+        Math.cos(angle) * velocity,
+        Math.sin(angle) * velocity
+      );
+    });
+    
+    // Only spawn enemies automatically if tutorial is complete
+    if (!this.isInTutorial) {
+      this.enemySpawnTimer += 16; // Assuming 60 FPS
+      if (this.enemySpawnTimer >= 5000) { // Every 5 seconds
+        this.spawnEnemy();
+        this.enemySpawnTimer = 0;
+      }
+    }
   }
 }
 
@@ -1184,8 +1792,10 @@ const PhaserGame: React.FC = () => {
       },
       scene: TutorialGameScene,
       scale: {
-        mode: Phaser.Scale.NONE,
-        autoCenter: Phaser.Scale.CENTER_BOTH
+        mode: Phaser.Scale.FIT,
+        autoCenter: Phaser.Scale.CENTER_BOTH,
+        width: 1000,
+        height: 700
       },
       render: {
         pixelArt: false,
@@ -1254,8 +1864,13 @@ const PhaserGame: React.FC = () => {
       
       <div 
         ref={containerRef}
-        className="border-2 border-gray-600 rounded-lg overflow-hidden shadow-2xl bg-black"
-        style={{ width: '1000px', height: '700px' }}
+        className="border-2 border-gray-600 rounded-lg shadow-2xl bg-black"
+        style={{ 
+          width: '1000px', 
+          height: '700px',
+          position: 'relative',
+          overflow: 'visible'
+        }}
       />
       <div className="mt-4 text-center text-white">
         <h2 className="text-xl font-bold mb-2 text-cyan-400">WAGUS: Origins - Tutorial Zone</h2>
